@@ -286,47 +286,50 @@ class OpenSearchService {
   async getFunnelAnalysis(tenantId, events, timeWindow = "1d") {
     const indexName = this.getEventIndex(tenantId);
 
-    // Build funnel query using filters aggregation
-    const funnelAggs = {};
-    events.forEach((event, index) => {
-      funnelAggs[`step_${index + 1}_${event}`] = {
-        filter: { term: { event_type: event } },
-      };
-    });
-
-    const searchBody = {
-      query: {
-        bool: {
-          must: [
-            { term: { tenant_id: tenantId } },
-            { range: { timestamp: { gte: `now-${timeWindow}` } } },
-          ],
-        },
-      },
-      size: 0,
-      aggs: {
-        funnel: {
-          filters: {
-            filters: funnelAggs,
-          },
-        },
-      },
-    };
+    // Get counts for each event type separately
+    const results = [];
 
     try {
-      const response = await this.client.search({
-        index: indexName,
-        body: searchBody,
-      });
+      for (let i = 0; i < events.length; i++) {
+        const event = events[i];
 
-      const buckets = response.body.aggregations.funnel.buckets;
-      const results = events.map((event, index) => ({
-        step: index + 1,
-        event,
-        count: buckets[`step_${index + 1}_${event}`].doc_count,
-      }));
+        const searchBody = {
+          query: {
+            bool: {
+              must: [
+                { term: { tenant_id: tenantId } },
+                { term: { event_type: event } },
+                { range: { timestamp: { gte: `now-${timeWindow}` } } },
+              ],
+            },
+          },
+          size: 0,
+          aggs: {
+            unique_users: {
+              cardinality: {
+                field: "user_id",
+              },
+            },
+          },
+        };
 
-      // Calculate conversion rates
+        const response = await this.client.search({
+          index: indexName,
+          body: searchBody,
+        });
+
+        const count = response.body.hits.total.value;
+        const uniqueUsers = response.body.aggregations.unique_users.value;
+
+        results.push({
+          step: i + 1,
+          event,
+          count,
+          unique_users: uniqueUsers,
+        });
+      }
+
+      // Calculate conversion rates based on first step
       results.forEach((step, index) => {
         if (index === 0) {
           step.conversion_rate = 100;

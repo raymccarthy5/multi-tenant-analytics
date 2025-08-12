@@ -99,22 +99,41 @@ const EventFeed = () => {
   const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
-    const eventSource = new EventSource(`${API_BASE}/events/stream`, {
-      headers: { "x-api-key": API_KEY },
-    });
+    // EventSource doesn't support custom headers, so we need to pass API key as query param
+    const eventSource = new EventSource(
+      `${API_BASE}/events/stream?api_key=${API_KEY}`
+    );
 
-    eventSource.onopen = () => setIsConnected(true);
-    eventSource.onerror = () => setIsConnected(false);
+    eventSource.onopen = () => {
+      console.log("SSE connection opened");
+      setIsConnected(true);
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("SSE connection error:", error);
+      setIsConnected(false);
+    };
 
     eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      console.log("SSE message received:", event.data);
 
-      if (data.type === "event") {
-        setEvents((prev) => [data.data, ...prev.slice(0, 9)]); // Keep last 10 events
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "event") {
+          setEvents((prev) => [data.data, ...prev.slice(0, 9)]); // Keep last 10 events
+        } else if (data.type === "connected") {
+          console.log("SSE stream established");
+        }
+      } catch (error) {
+        console.error("Error parsing SSE data:", error);
       }
     };
 
-    return () => eventSource.close();
+    return () => {
+      console.log("Closing SSE connection");
+      eventSource.close();
+    };
   }, []);
 
   return (

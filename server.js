@@ -32,9 +32,9 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-// Auth middleware - extracts tenant from API key
+// Auth middleware - extracts tenant from API key (header or query param)
 const authenticateTenant = async (req, res, next) => {
-  const apiKey = req.headers["x-api-key"];
+  const apiKey = req.headers["x-api-key"] || req.query.api_key;
 
   if (!apiKey) {
     return res.status(401).json({ error: "API key required" });
@@ -94,13 +94,16 @@ app.post("/track", authenticateTenant, async (req, res) => {
     });
 
     // Broadcast to real-time dashboard
-    broadcastEvent(req.tenantId, {
+    const eventForBroadcast = {
       id: pgResult.rows[0].id,
       event_type: event,
       properties,
       user_id: userId,
+      session_id: sessionId,
       timestamp: pgResult.rows[0].timestamp,
-    });
+    };
+
+    broadcastEvent(req.tenantId, eventForBroadcast);
 
     await client.query("COMMIT");
 
@@ -160,6 +163,18 @@ app.post("/track/batch", authenticateTenant, async (req, res) => {
 
     // Bulk index to OpenSearch
     await opensearch.bulkIndexEvents(req.tenantId, opensearchEvents);
+
+    // Broadcast each event to real-time dashboard
+    opensearchEvents.forEach((evt, index) => {
+      broadcastEvent(req.tenantId, {
+        id: insertedIds[index],
+        event_type: evt.event_type,
+        properties: evt.properties,
+        user_id: evt.user_id,
+        session_id: evt.session_id,
+        timestamp: evt.timestamp,
+      });
+    });
 
     await client.query("COMMIT");
 
@@ -245,42 +260,73 @@ app.post("/analytics/funnel", authenticateTenant, async (req, res) => {
 
 // Real-time events stream (SSE)
 app.get("/events/stream", authenticateTenant, (req, res) => {
+  // Set SSE headers with proper CORS
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": "http://localhost:3001",
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Headers": "x-api-key, Content-Type",
   });
+
+  // Send immediate connection confirmation
+  res.write('data: {"type":"connected","message":"Stream established"}\n\n');
 
   // Send heartbeat every 30 seconds
   const heartbeat = setInterval(() => {
-    res.write('data: {"type":"heartbeat"}\n\n');
+    try {
+      res.write(
+        'data: {"type":"heartbeat","timestamp":"' +
+          new Date().toISOString() +
+          '"}\n\n'
+      );
+    } catch (error) {
+      clearInterval(heartbeat);
+    }
   }, 30000);
 
   // Store connection for broadcasting
-  const connectionId = Date.now();
+  const connectionId = Date.now() + Math.random();
   if (!global.sseConnections) global.sseConnections = new Map();
   global.sseConnections.set(connectionId, { res, tenantId: req.tenantId });
 
+  // Cleanup on disconnect
   req.on("close", () => {
+    clearInterval(heartbeat);
+    global.sseConnections.delete(connectionId);
+    console.log("SSE client disconnected:", connectionId);
+  });
+
+  req.on("error", () => {
     clearInterval(heartbeat);
     global.sseConnections.delete(connectionId);
   });
 
-  res.write('data: {"type":"connected"}\n\n');
+  console.log(
+    "SSE client connected:",
+    connectionId,
+    "for tenant:",
+    req.tenantId
+  );
 });
 
 // Broadcast new events to SSE connections
 function broadcastEvent(tenantId, eventData) {
   if (!global.sseConnections) return;
 
+  let broadcastCount = 0;
   global.sseConnections.forEach((conn, id) => {
     if (conn.tenantId === tenantId) {
       try {
-        conn.res.write(
-          `data: ${JSON.stringify({ type: "event", data: eventData })}\n\n`
-        );
+        const message = `data: ${JSON.stringify({
+          type: "event",
+          data: eventData,
+        })}\n\n`;
+        conn.res.write(message);
+        broadcastCount++;
       } catch (error) {
+        console.error("Broadcast error to connection", id, error.message);
         global.sseConnections.delete(id);
       }
     }
