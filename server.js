@@ -93,6 +93,15 @@ app.post("/track", authenticateTenant, async (req, res) => {
       timestamp: pgResult.rows[0].timestamp,
     });
 
+    // Broadcast to real-time dashboard
+    broadcastEvent(req.tenantId, {
+      id: pgResult.rows[0].id,
+      event_type: event,
+      properties,
+      user_id: userId,
+      timestamp: pgResult.rows[0].timestamp,
+    });
+
     await client.query("COMMIT");
 
     res.status(201).json({
@@ -234,6 +243,123 @@ app.post("/analytics/funnel", authenticateTenant, async (req, res) => {
   }
 });
 
+// Real-time events stream (SSE)
+app.get("/events/stream", authenticateTenant, (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+  });
+
+  // Send heartbeat every 30 seconds
+  const heartbeat = setInterval(() => {
+    res.write('data: {"type":"heartbeat"}\n\n');
+  }, 30000);
+
+  // Store connection for broadcasting
+  const connectionId = Date.now();
+  if (!global.sseConnections) global.sseConnections = new Map();
+  global.sseConnections.set(connectionId, { res, tenantId: req.tenantId });
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    global.sseConnections.delete(connectionId);
+  });
+
+  res.write('data: {"type":"connected"}\n\n');
+});
+
+// Broadcast new events to SSE connections
+function broadcastEvent(tenantId, eventData) {
+  if (!global.sseConnections) return;
+
+  global.sseConnections.forEach((conn, id) => {
+    if (conn.tenantId === tenantId) {
+      try {
+        conn.res.write(
+          `data: ${JSON.stringify({ type: "event", data: eventData })}\n\n`
+        );
+      } catch (error) {
+        global.sseConnections.delete(id);
+      }
+    }
+  });
+}
+
+// Usage metrics endpoint
+app.get("/analytics/usage", authenticateTenant, async (req, res) => {
+  const days = parseInt(req.query.days) || 30;
+
+  try {
+    const analytics = await opensearch.getAnalytics(req.tenantId, {
+      startDate: `now-${days}d`,
+      endDate: "now",
+      interval: days > 7 ? "day" : "hour",
+    });
+
+    // Calculate growth rate
+    const events = analytics.events_over_time;
+    const midPoint = Math.floor(events.length / 2);
+    const firstHalf = events
+      .slice(0, midPoint)
+      .reduce((sum, item) => sum + item.count, 0);
+    const secondHalf = events
+      .slice(midPoint)
+      .reduce((sum, item) => sum + item.count, 0);
+    const growthRate =
+      firstHalf > 0
+        ? (((secondHalf - firstHalf) / firstHalf) * 100).toFixed(1)
+        : 0;
+
+    res.json({
+      ...analytics,
+      growth_rate: parseFloat(growthRate),
+      period_days: days,
+    });
+  } catch (error) {
+    console.error("Usage analytics error:", error);
+    res.status(500).json({ error: "Failed to get usage analytics" });
+  }
+});
+
+// Dashboard config endpoint
+app.get("/dashboard/config", authenticateTenant, async (req, res) => {
+  try {
+    // Get tenant info
+    const tenantResult = await pool.query(
+      "SELECT name FROM tenants WHERE id = $1",
+      [req.tenantId]
+    );
+
+    // Get recent activity summary
+    const analytics = await opensearch.getAnalytics(req.tenantId, {
+      startDate: "now-24h",
+      endDate: "now",
+    });
+
+    res.json({
+      tenant: {
+        id: req.tenantId,
+        name: tenantResult.rows[0]?.name || "Unknown",
+      },
+      last_24h: {
+        total_events: analytics.total_events,
+        unique_users: analytics.unique_users,
+        top_event: analytics.top_events[0]?.event || null,
+      },
+    });
+  } catch (error) {
+    console.error("Dashboard config error:", error);
+    res.status(500).json({ error: "Failed to get dashboard config" });
+  }
+});
+
+// Start server
+app.listen(port, () => {
+  console.log(`Analytics API running on port ${port}`);
+});
+
 // OpenSearch health check
 app.get("/opensearch/health", async (req, res) => {
   try {
@@ -242,11 +368,6 @@ app.get("/opensearch/health", async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: "OpenSearch unhealthy" });
   }
-});
-
-// Start server
-app.listen(port, () => {
-  console.log(`Analytics API running on port ${port}`);
 });
 
 module.exports = app;
