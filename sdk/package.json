@@ -1,15 +1,29 @@
 {
-  "name": "sdk",
+  "name": "@raymond-mccarthy/analytics-sdk",
   "version": "1.0.0",
-  "description": "",
+  "description": "Multi-tenant analytics SDK with automatic batching and tenant isolation",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "analytics",
+    "tracking",
+    "multi-tenant",
+    "saas",
+    "events",
+    "metrics"
+  ],
+  "author": "Raymond McCarthy",
   "license": "ISC",
   "dependencies": {
     "axios": "^1.11.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/raymccarthy5/multi-tenant-analytics"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }
